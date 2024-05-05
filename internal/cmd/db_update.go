@@ -16,13 +16,13 @@ func init() {
 }
 
 var dbUpdateCmd = &cobra.Command{
-	Use:               "update database_name",
+	Use:               "update <database-name>",
 	Short:             "Updates the database to the latest turso version",
 	Args:              cobra.ExactArgs(1),
 	ValidArgsFunction: dbNameArg,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cmd.SilenceUsage = true
-		client, err := createTursoClientFromAccessToken(true)
+		client, err := authedTursoClient()
 		if err != nil {
 			return err
 		}

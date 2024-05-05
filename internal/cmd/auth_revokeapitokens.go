@@ -13,13 +13,13 @@ func init() {
 }
 
 var revokeApiTokensCmd = &cobra.Command{
-	Use:   "revoke api_token_name",
+	Use:   "revoke <api-token-name>",
 	Short: "Revoke an API token.",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cmd.SilenceUsage = true
 
-		client, err := createTursoClientFromAccessToken(true)
+		client, err := authedTursoClient()
 		if err != nil {
 			return err
 		}

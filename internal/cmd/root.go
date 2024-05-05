@@ -8,6 +8,7 @@ import (
 	semver "github.com/hashicorp/go-version"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"github.com/tursodatabase/turso-cli/internal"
 	"github.com/tursodatabase/turso-cli/internal/flags"
 	"github.com/tursodatabase/turso-cli/internal/settings"
 )
@@ -33,14 +34,24 @@ func init() {
 		fmt.Fprintf(os.Stderr, "error binding token flag: %s", err)
 	}
 	rootCmd.PersistentFlags().BoolVar(&noMultipleTokenSourcesWarning, "no-multiple-token-sources-warning", false, "Don't warn about multiple access token sources")
+	_ = rootCmd.PersistentFlags().MarkHidden("no-multiple-token-sources-warning")
 
 	rootCmd.PersistentPostRun = func(cmd *cobra.Command, args []string) {
+		configSettings, err := settings.ReadSettings()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Error reading settings:", err)
+			return
+		}
 		settings.PersistChanges()
+
+		if !isInteractive() {
+			return
+		}
+
 		if version == "dev" {
 			return
 		}
-		settings, _ := settings.ReadSettings()
-		if settings.GetAutoupdate() == "on" && time.Now().Unix() >= settings.GetLastUpdateCheck()+int64(24*60*60) {
+		if configSettings.GetAutoupdate() == "on" && time.Now().Unix() >= configSettings.GetLastUpdateCheck()+int64(24*60*60) {
 			latest, err := fetchLatestVersion()
 			if err != nil {
 				_, _ = fmt.Fprintln(os.Stderr, "Error fetching latest version:", err)
@@ -64,8 +75,10 @@ func init() {
 				if err != nil {
 					_, _ = fmt.Fprintln(os.Stderr, "Error updating:", err)
 				}
+				fmt.Printf("\nYou can disable automatic updates with %s\n", internal.Emph("turso config set autoupdate off"))
 			}
-			settings.SetLastUpdateCheck(time.Now().Unix())
+			configSettings.SetLastUpdateCheck(time.Now().Unix())
+			settings.PersistChanges()
 		}
 	}
 	rootCmd.CompletionOptions.HiddenDefaultCmd = true

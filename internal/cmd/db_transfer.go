@@ -14,13 +14,13 @@ func init() {
 }
 
 var dbTransferCmd = &cobra.Command{
-	Use:               "db-transfer database_name org_name",
+	Use:               "db-transfer <database-name> <organization-name>",
 	Short:             "Transfers a database to another organization",
 	Args:              cobra.ExactArgs(2),
 	ValidArgsFunction: dbNameAndOrgArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cmd.SilenceUsage = true
-		client, err := createTursoClientFromAccessToken(true)
+		client, err := authedTursoClient()
 		if err != nil {
 			return err
 		}
@@ -55,7 +55,7 @@ func transfer(client *turso.Client, dbName, orgName string) error {
 	defer s.Stop()
 
 	if err := client.Databases.Transfer(dbName, orgName); err != nil {
-		return fmt.Errorf("error transferring database: %w", err)
+		return err
 	}
 
 	s.Stop()

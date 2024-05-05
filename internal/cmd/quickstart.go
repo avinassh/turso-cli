@@ -3,27 +3,60 @@ package cmd
 import (
 	"fmt"
 
+	"github.com/pkg/browser"
 	"github.com/spf13/cobra"
-	"github.com/tursodatabase/turso-cli/internal"
+	"github.com/tursodatabase/turso-cli/internal/settings"
 )
 
 func init() {
 	rootCmd.AddCommand(quickstartCmd)
+	rootCmd.AddCommand(postInstallCmd)
 }
 
 var quickstartCmd = &cobra.Command{
 	Use:               "quickstart",
-	Short:             "Turso quick quickstart.",
+	Short:             "New to Turso? Start here!",
 	Args:              cobra.NoArgs,
 	ValidArgsFunction: noFilesArg,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cmd.SilenceUsage = true
-		fmt.Print("\nWelcome to Turso!\n\n")
-		fmt.Printf("If you are a new user, please sign up with %s; otherwise login\n", internal.Emph("turso auth signup"))
-		fmt.Printf("with %s. When you are authenticated, you can create a new\n", internal.Emph("turso auth login"))
-		fmt.Printf("database with %s. You can also run %s for help.\n", internal.Emph("turso db create"), internal.Emph("turso help"))
-		fmt.Printf("\nFor a more comprehensive getting started guide, open the following URL:\n\n")
-		fmt.Printf("  https://docs.turso.tech/tutorials/get-started-turso-cli\n\n")
+		quickstart(false)
 		return nil
 	},
+}
+
+var postInstallCmd = &cobra.Command{
+	Use:    "post-install",
+	Hidden: true,
+	Args:   cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cmd.SilenceUsage = true
+		if checkSignedIn() {
+			return nil
+		}
+		quickstart(true)
+		return nil
+	},
+}
+
+func quickstart(headless bool) {
+	fmt.Print("\nWelcome to Turso!\n\n")
+
+	quickstartURL := "https://docs.turso.tech/quickstart"
+	if headless || browser.OpenURL(quickstartURL) != nil {
+		fmt.Printf("To get started with Turso, open the following URL in your browser:\n\n")
+		fmt.Println(quickstartURL)
+		return
+	}
+
+	fmt.Println("Opening Turso Quickstart Guide in your browser...")
+}
+
+func checkSignedIn() bool {
+	settings, err := settings.ReadSettings()
+	if err != nil {
+		return false
+	}
+
+	return isJwtTokenValid(settings.GetToken())
 }

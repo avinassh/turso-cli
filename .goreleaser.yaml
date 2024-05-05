@@ -57,13 +57,15 @@ brews:
     tap:
       owner: tursodatabase
       name: homebrew-tap
+    dependencies:
+      - name: libsql/sqld/libsql-server
     install: |
       bin.install "turso"
       bash_completion.install "completions/turso.bash" => "turso"
       zsh_completion.install "completions/turso.zsh" => "_turso"
       fish_completion.install "completions/turso.fish"
     post_install: |
-      exec('turso quickstart')
+      exec('turso post-install')
 
 # The lines beneath this are called `modelines`. See `:help modeline`
 # Feel free to remove those if you don't want/use them.

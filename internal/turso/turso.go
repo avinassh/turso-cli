@@ -1,7 +1,6 @@
 package turso
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -36,6 +35,7 @@ type Client struct {
 	Subscriptions *SubscriptionClient
 	Billing       *BillingClient
 	Groups        *GroupsClient
+	Invoices      *InvoicesClient
 }
 
 // Client struct that will be aliases by all other clients
@@ -59,6 +59,7 @@ func New(base *url.URL, token string, cliVersion string, org string) *Client {
 	c.Subscriptions = (*SubscriptionClient)(c.base)
 	c.Billing = (*BillingClient)(c.base)
 	c.Groups = (*GroupsClient)(c.base)
+	c.Invoices = (*InvoicesClient)(c.base)
 	return c
 }
 
@@ -144,26 +145,30 @@ func (t *Client) Patch(path string, body io.Reader) (*http.Response, error) {
 	return t.do("PATCH", path, body)
 }
 
+func (t *Client) Put(path string, body io.Reader) (*http.Response, error) {
+	return t.do("PUT", path, body)
+}
+
 func (t *Client) Upload(path string, fileData *os.File) (*http.Response, error) {
-	var b bytes.Buffer
-	w := multipart.NewWriter(&b)
-	formFile, err := w.CreateFormFile("file", fileData.Name())
+	body, bodyWriter := io.Pipe()
+	writer := multipart.NewWriter(bodyWriter)
+	go func() {
+		formFile, err := writer.CreateFormFile("file", fileData.Name())
+		if err != nil {
+			bodyWriter.CloseWithError(err)
+			return
+		}
+		if _, err := io.Copy(formFile, fileData); err != nil {
+			bodyWriter.CloseWithError(err)
+			return
+		}
+		bodyWriter.CloseWithError(writer.Close())
+	}()
+	req, err := t.newRequest("POST", path, body)
 	if err != nil {
-		w.Close()
 		return nil, err
 	}
-
-	if _, err := io.Copy(formFile, fileData); err != nil {
-		w.Close()
-		return nil, err
-	}
-	w.Close()
-
-	req, err := t.newRequest("POST", path, &b)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", w.FormDataContentType())
+	req.Header.Set("Content-Type", writer.FormDataContentType())
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err

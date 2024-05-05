@@ -22,12 +22,12 @@ func init() {
 }
 
 var replicateCmd = &cobra.Command{
-	Use:               "replicate database_name location_id",
+	Use:               "replicate <database-name> <location-code>",
 	Short:             "Replicate a database.",
 	Args:              cobra.RangeArgs(1, 2),
 	ValidArgsFunction: replicateArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		client, err := createTursoClientFromAccessToken(true)
+		client, err := authedTursoClient()
 		if err != nil {
 			return err
 		}
@@ -147,7 +147,7 @@ func createInstance(client *turso.Client, database turso.Database, location stri
 }
 
 func replicateArgs(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-	client, err := createTursoClientFromAccessToken(false)
+	client, err := authedTursoClient()
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp | cobra.ShellCompDirectiveNoSpace
 	}

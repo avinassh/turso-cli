@@ -7,7 +7,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/tursodatabase/turso-cli/internal"
 	"github.com/tursodatabase/turso-cli/internal/prompt"
-	"github.com/tursodatabase/turso-cli/internal/turso"
 )
 
 func init() {
@@ -15,7 +14,7 @@ func init() {
 }
 
 var createApiTokensCmd = &cobra.Command{
-	Use:   "mint api_token_name",
+	Use:   "mint <api-token-name>",
 	Short: "Mint an API token.",
 	Long: "" +
 		"API tokens are revocable non-expiring tokens that authenticate holders as the user who minted them.\n" +
@@ -24,17 +23,12 @@ var createApiTokensCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cmd.SilenceUsage = true
 
-		client, err := createTursoClientFromAccessToken(true)
+		client, err := authedTursoClient()
 		if err != nil {
 			return err
 		}
 
 		name := strings.TrimSpace(args[0])
-
-		if err := turso.CheckName(name); err != nil {
-			return fmt.Errorf("invalid token name: %w", err)
-		}
-
 		description := fmt.Sprintf("Creating api token %s", internal.Emph(name))
 		bar := prompt.Spinner(description)
 		defer bar.Stop()

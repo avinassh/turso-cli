@@ -19,6 +19,7 @@ type Database struct {
 	Hostname      string
 	Version       string
 	Group         string
+	Sleeping      bool
 }
 
 type DatabasesClient client
@@ -89,10 +90,12 @@ type CreateDatabaseBody struct {
 	Extensions string  `json:"extensions,omitempty"`
 	Group      string  `json:"group,omitempty"`
 	Seed       *DBSeed `json:"seed,omitempty"`
+	Schema     string  `json:"schema,omitempty"`
+	IsSchema   bool    `json:"is_schema,omitempty"`
 }
 
-func (d *DatabasesClient) Create(name, location, image, extensions, group string, seed *DBSeed) (*CreateDatabaseResponse, error) {
-	params := CreateDatabaseBody{name, location, image, extensions, group, seed}
+func (d *DatabasesClient) Create(name, location, image, extensions, group string, schema string, isSchema bool, seed *DBSeed) (*CreateDatabaseResponse, error) {
+	params := CreateDatabaseBody{name, location, image, extensions, group, seed, schema, isSchema}
 
 	body, err := marshal(params)
 	if err != nil {
@@ -174,13 +177,24 @@ func (d *DatabasesClient) UploadDump(dbFile *os.File) (string, error) {
 	return data.DumpURL, nil
 }
 
-func (d *DatabasesClient) Token(database string, expiration string, readOnly bool) (string, error) {
+type DatabaseTokenRequest struct {
+	Permissions *PermissionsClaim `json:"permissions,omitempty"`
+}
+
+func (d *DatabasesClient) Token(database string, expiration string, readOnly bool, permissions *PermissionsClaim) (string, error) {
 	authorization := ""
 	if readOnly {
 		authorization = "&authorization=read-only"
 	}
 	url := d.URL(fmt.Sprintf("/%s/auth/tokens?expiration=%s%s", database, expiration, authorization))
-	r, err := d.client.Post(url, nil)
+
+	req := DatabaseTokenRequest{permissions}
+	body, err := marshal(req)
+	if err != nil {
+		return "", fmt.Errorf("could not serialize request body: %w", err)
+	}
+
+	r, err := d.client.Post(url, body)
 	if err != nil {
 		return "", fmt.Errorf("failed to get database token: %w", err)
 	}
@@ -192,8 +206,7 @@ func (d *DatabasesClient) Token(database string, expiration string, readOnly boo
 	}
 
 	if r.StatusCode != http.StatusOK {
-		err, _ := unmarshal[string](r)
-		return "", fmt.Errorf("failed to get database token: %d %s", r.StatusCode, err)
+		return "", fmt.Errorf("failed to get database token: %w", parseResponseError(r))
 	}
 
 	type JwtResponse struct{ Jwt string }
@@ -218,8 +231,7 @@ func (d *DatabasesClient) Rotate(database string) error {
 	}
 
 	if r.StatusCode != http.StatusOK {
-		err, _ := unmarshal[string](r)
-		return fmt.Errorf("failed to rotate database keys: %d %s", r.StatusCode, err)
+		return fmt.Errorf("failed to rotate database keys: %w", parseResponseError(r))
 	}
 
 	return nil
@@ -242,11 +254,38 @@ func (d *DatabasesClient) Update(database string, group bool) error {
 	}
 
 	if r.StatusCode != http.StatusOK {
-		err, _ := unmarshal[string](r)
-		return fmt.Errorf("failed to update database: %d %s", r.StatusCode, err)
+		return fmt.Errorf("failed to update database: %w", parseResponseError(r))
 	}
 
 	return nil
+}
+
+type Stats struct {
+	TopQueries []struct {
+		Query       string `json:"query"`
+		RowsRead    int    `json:"rows_read"`
+		RowsWritten int    `json:"rows_written"`
+	} `json:"top_queries,omitempty"`
+}
+
+func (d *DatabasesClient) Stats(database string) (Stats, error) {
+	url := d.URL(fmt.Sprintf("/%s/stats", database))
+	r, err := d.client.Get(url, nil)
+	if err != nil {
+		return Stats{}, fmt.Errorf("failed to update database: %w", err)
+	}
+	defer r.Body.Close()
+
+	org := d.client.Org
+	if isNotMemberErr(r.StatusCode, org) {
+		return Stats{}, notMemberErr(org)
+	}
+
+	if r.StatusCode != http.StatusOK {
+		return Stats{}, fmt.Errorf("failed to get stats for database: %w", parseResponseError(r))
+	}
+
+	return unmarshal[Stats](r)
 }
 
 type Body struct {
@@ -265,13 +304,29 @@ func (d *DatabasesClient) Transfer(database, org string) error {
 		return fmt.Errorf("failed to transfer database")
 	}
 	defer r.Body.Close()
-	if r.StatusCode == http.StatusForbidden {
-		err = parseResponseError(r)
-		return fmt.Errorf("%v", err)
+
+	if r.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to transfer %s database to org %s: %w", database, org, parseResponseError(r))
+	}
+
+	return nil
+}
+
+func (d *DatabasesClient) Wakeup(database string) error {
+	url := d.URL(fmt.Sprintf("/%s/wakeup", database))
+	r, err := d.client.Post(url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to wakeup database: %w", err)
+	}
+	defer r.Body.Close()
+
+	org := d.client.Org
+	if isNotMemberErr(r.StatusCode, org) {
+		return notMemberErr(org)
 	}
 
 	if r.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to transfer database to org %s", org)
+		return fmt.Errorf("failed to wakeup database: %w", parseResponseError(r))
 	}
 
 	return nil
@@ -281,6 +336,7 @@ type Usage struct {
 	RowsRead         uint64 `json:"rows_read,omitempty"`
 	RowsWritten      uint64 `json:"rows_written,omitempty"`
 	StorageBytesUsed uint64 `json:"storage_bytes,omitempty"`
+	BytesSynced      uint64 `json:"bytes_synced,omitempty"`
 }
 
 type InstanceUsage struct {
@@ -308,8 +364,7 @@ func (d *DatabasesClient) Usage(database string) (DbUsage, error) {
 	defer r.Body.Close()
 
 	if r.StatusCode != http.StatusOK {
-		err, _ := unmarshal[string](r)
-		return DbUsage{}, fmt.Errorf("failed to get database usage: %d %s", r.StatusCode, err)
+		return DbUsage{}, fmt.Errorf("failed to get database usage: %w", parseResponseError(r))
 	}
 
 	body, err := unmarshal[DbUsageResponse](r)
@@ -325,4 +380,54 @@ func (d *DatabasesClient) URL(suffix string) string {
 		prefix = "/v1/organizations/" + d.client.Org
 	}
 	return prefix + "/databases" + suffix
+}
+
+type DatabaseConfig struct {
+	AllowAttach bool `json:"allow_attach"`
+}
+
+func (d *DatabasesClient) GetConfig(database string) (DatabaseConfig, error) {
+	url := d.URL(fmt.Sprintf("/%s/configuration", database))
+	r, err := d.client.Get(url, nil)
+	if err != nil {
+		return DatabaseConfig{}, fmt.Errorf("failed to get database: %w", err)
+	}
+	defer r.Body.Close()
+
+	org := d.client.Org
+	if isNotMemberErr(r.StatusCode, org) {
+		return DatabaseConfig{}, notMemberErr(org)
+	}
+
+	if r.StatusCode != http.StatusOK {
+		err = parseResponseError(r)
+		return DatabaseConfig{}, fmt.Errorf("failed to get config for database: %d %s", r.StatusCode, err)
+	}
+
+	return unmarshal[DatabaseConfig](r)
+}
+
+func (d *DatabasesClient) UpdateConfig(database string, config DatabaseConfig) error {
+	url := d.URL(fmt.Sprintf("/%s/configuration", database))
+	body, err := marshal(config)
+	if err != nil {
+		return fmt.Errorf("could not serialize request body: %w", err)
+	}
+	r, err := d.client.Patch(url, body)
+	if err != nil {
+		return fmt.Errorf("failed to update database: %w", err)
+	}
+	defer r.Body.Close()
+
+	org := d.client.Org
+	if isNotMemberErr(r.StatusCode, org) {
+		return notMemberErr(org)
+	}
+
+	if r.StatusCode != http.StatusOK {
+		err = parseResponseError(r)
+		return fmt.Errorf("failed to update config for database: %d %s", r.StatusCode, err)
+	}
+
+	return nil
 }

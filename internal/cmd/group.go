@@ -25,8 +25,33 @@ func init() {
 	addCanaryFlag(groupsCreateCmd)
 	groupCmd.AddCommand(groupsDestroyCmd)
 	addYesFlag(groupsDestroyCmd, "Confirms the destruction of the group, with all its locations and databases.")
+	groupCmd.AddCommand(groupShowCmd)
 }
 
+var groupShowCmd = &cobra.Command{
+	Use:               "show <group-name>",
+	Short:             "Show information about a group.",
+	Args:              cobra.ExactArgs(1),
+	ValidArgsFunction: groupArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cmd.SilenceUsage = true
+		client, err := authedTursoClient()
+		if err != nil {
+			return err
+		}
+
+		name := args[0]
+		group, err := getGroup(client, name)
+		if err != nil {
+			return err
+		}
+
+		version := group.Version
+		fmt.Printf("Locations:  %s\n", formatLocations(group.Locations, group.Primary))
+		fmt.Printf("Version:    %s\n", internal.Emph(version))
+		return nil
+	},
+}
 var groupsListCmd = &cobra.Command{
 	Use:               "list",
 	Short:             "List databases groups",
@@ -34,7 +59,7 @@ var groupsListCmd = &cobra.Command{
 	ValidArgsFunction: noFilesArg,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cmd.SilenceUsage = true
-		client, err := createTursoClientFromAccessToken(true)
+		client, err := authedTursoClient()
 		if err != nil {
 			return err
 		}
@@ -44,26 +69,21 @@ var groupsListCmd = &cobra.Command{
 			return err
 		}
 
-		printTable([]string{"Name", "Locations"}, groupsTable(groups))
+		printTable([]string{"Name", "Locations", "Version", "Sleeping"}, groupsTable(groups))
 		return nil
 	},
 }
 
 var groupsCreateCmd = &cobra.Command{
-	Use:               "create [group]",
+	Use:               "create <group-name>",
 	Short:             "Create a database group",
 	Args:              cobra.ExactArgs(1),
 	ValidArgsFunction: noFilesArg,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cmd.SilenceUsage = true
-		client, err := createTursoClientFromAccessToken(true)
+		client, err := authedTursoClient()
 		if err != nil {
 			return err
-		}
-
-		name := args[0]
-		if err := turso.CheckName(name); err != nil {
-			return fmt.Errorf("invalid group name: %w", err)
 		}
 
 		location := locationFlag
@@ -79,18 +99,19 @@ var groupsCreateCmd = &cobra.Command{
 			version = "canary"
 		}
 
+		name := args[0]
 		return createGroup(client, name, location, version)
 	},
 }
 
 var unarchiveGroupCmd = &cobra.Command{
-	Use:               "unarchive [group]",
-	Short:             "Unarchive a database group",
+	Use:               "wakeup <group-name>",
+	Short:             "Wake up a database group",
 	Args:              cobra.ExactArgs(1),
 	ValidArgsFunction: groupArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cmd.SilenceUsage = true
-		client, err := createTursoClientFromAccessToken(true)
+		client, err := authedTursoClient()
 		if err != nil {
 			return err
 		}
@@ -101,13 +122,13 @@ var unarchiveGroupCmd = &cobra.Command{
 }
 
 var groupsDestroyCmd = &cobra.Command{
-	Use:               "destroy [group]",
+	Use:               "destroy <group-name>",
 	Short:             "Destroy a database group",
 	Args:              cobra.ExactArgs(1),
 	ValidArgsFunction: groupArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cmd.SilenceUsage = true
-		client, err := createTursoClientFromAccessToken(true)
+		client, err := authedTursoClient()
 		if err != nil {
 			return err
 		}
@@ -157,7 +178,7 @@ func createGroup(client *turso.Client, name, location, version string) error {
 
 func unarchiveGroup(client *turso.Client, name string) error {
 	start := time.Now()
-	s := prompt.Spinner(fmt.Sprintf("Unarchiving group %s... ", internal.Emph(name)))
+	s := prompt.Spinner(fmt.Sprintf("Waking up group %s... ", internal.Emph(name)))
 	defer s.Stop()
 
 	if err := client.Groups.Unarchive(name); err != nil {
@@ -166,7 +187,7 @@ func unarchiveGroup(client *turso.Client, name string) error {
 	s.Stop()
 	elapsed := time.Since(start)
 	invalidateGroupsCache(client.Org)
-	fmt.Printf("Unarchived group %s in %d seconds.\n", internal.Emph(name), int(elapsed.Seconds()))
+	fmt.Printf("Waked up group %s in %d seconds.\n", internal.Emph(name), int(elapsed.Seconds()))
 	return nil
 }
 
@@ -189,7 +210,7 @@ func destroyGroup(client *turso.Client, name string) error {
 func groupsTable(groups []turso.Group) [][]string {
 	var data [][]string
 	for _, group := range groups {
-		row := []string{group.Name, formatLocations(group.Locations, group.Primary)}
+		row := []string{group.Name, formatLocations(group.Locations, group.Primary), group.Version, formatBool(group.Archived)}
 		data = append(data, row)
 	}
 	return data

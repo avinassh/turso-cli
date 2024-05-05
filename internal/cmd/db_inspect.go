@@ -13,77 +13,11 @@ import (
 func init() {
 	dbCmd.AddCommand(dbInspectCmd)
 	addVerboseFlag(dbInspectCmd)
-}
-
-type InspectInstanceInfo struct {
-	Location      string
-	Name          string
-	Type          string
-	StorageInfos  []StorageInfo
-	RowsReadCount uint64
-}
-
-type InspectInfo struct {
-	instanceInfos [](*InspectInstanceInfo)
-}
-
-type StorageInfo struct {
-	Type        string
-	Name        string
-	SizeTables  uint64
-	SizeIndexes uint64
-}
-
-func (curr *InspectInstanceInfo) totalTablesSize() uint64 {
-	var total uint64
-	for _, storageInfo := range curr.StorageInfos {
-		total += storageInfo.SizeTables
-	}
-	return total
-}
-
-func (curr *InspectInstanceInfo) totalIndexesSize() uint64 {
-	var total uint64
-	for _, storageInfo := range curr.StorageInfos {
-		total += storageInfo.SizeIndexes
-	}
-	return total
-}
-
-func (curr *InspectInfo) Accumulate(n *InspectInstanceInfo) {
-	curr.instanceInfos = append(curr.instanceInfos, n)
-}
-
-func (curr *InspectInfo) totalTablesSize() uint64 {
-	var total uint64
-	for _, instanceInfo := range curr.instanceInfos {
-		total += instanceInfo.totalTablesSize()
-	}
-	return total
-}
-
-func (curr *InspectInfo) totalIndexesSize() uint64 {
-	var total uint64
-	for _, instanceInfo := range curr.instanceInfos {
-		total += instanceInfo.totalIndexesSize()
-	}
-	return total
-}
-
-func (curr *InspectInfo) PrintTotalStorage() string {
-	return humanize.Bytes(curr.totalTablesSize() + curr.totalIndexesSize())
-}
-
-func (curr *InspectInfo) TotalRowsReadCount() uint64 {
-	var total uint64
-	for _, instanceInfo := range curr.instanceInfos {
-		total += instanceInfo.RowsReadCount
-	}
-	return total
+	addQueriesFlag(dbInspectCmd)
 }
 
 var dbInspectCmd = &cobra.Command{
-	Use:               "inspect {database_name}",
+	Use:               "inspect <database-name>",
 	Short:             "Inspect database.",
 	Example:           "turso db inspect name-of-my-amazing-db",
 	Args:              cobra.RangeArgs(1, 2),
@@ -95,9 +29,13 @@ var dbInspectCmd = &cobra.Command{
 		}
 		cmd.SilenceUsage = true
 
-		client, err := createTursoClientFromAccessToken(true)
+		client, err := authedTursoClient()
 		if err != nil {
 			return err
+		}
+
+		if queriesFlag {
+			return handleInspectQueries(client, name)
 		}
 
 		db, err := getDatabase(client, name, true)
@@ -113,6 +51,9 @@ var dbInspectCmd = &cobra.Command{
 		fmt.Printf("Total space used: %s\n", humanize.Bytes(dbUsage.Usage.StorageBytesUsed))
 		fmt.Printf("Number of rows read: %d\n", dbUsage.Usage.RowsRead)
 		fmt.Printf("Number of rows written: %d\n", dbUsage.Usage.RowsWritten)
+		if dbUsage.Usage.BytesSynced != 0 {
+			fmt.Printf("Embedded syncs: %s\n", humanize.Bytes(dbUsage.Usage.BytesSynced))
+		}
 
 		if len(instances) == 0 {
 			fmt.Printf("\n🛠 Run %s to finish your database creation!\n", internal.Emph("turso db replicate "+db.Name))
@@ -124,14 +65,14 @@ var dbInspectCmd = &cobra.Command{
 		}
 
 		instancesUsage := getInstanceUsageMap(dbUsage.Instances)
-		tbl := table.New("LOCATION", "TYPE", "INSTANCE NAME", "ROWS READ", "ROWS WRITTEN", "TOTAL STORAGE")
+		tbl := table.New("LOCATION", "TYPE", "INSTANCE NAME", "ROWS READ", "ROWS WRITTEN", "TOTAL STORAGE", "BYTES SYNCED")
 		for _, instance := range instances {
 			usg, ok := instancesUsage[instance.Uuid]
 			if !ok {
 				tbl.AddRow(instance.Region, instance.Type, instance.Name, "-", "-", "-")
 				continue
 			}
-			tbl.AddRow(instance.Region, instance.Type, instance.Name, usg.RowsRead, usg.RowsWritten, humanize.Bytes(usg.StorageBytesUsed))
+			tbl.AddRow(instance.Region, instance.Type, instance.Name, usg.RowsRead, usg.RowsWritten, humanize.Bytes(usg.StorageBytesUsed), humanize.Bytes(usg.BytesSynced))
 		}
 
 		fmt.Println()
@@ -148,4 +89,18 @@ func getInstanceUsageMap(usages []turso.InstanceUsage) map[string]turso.Usage {
 		m[usg.UUID] = usg.Usage
 	}
 	return m
+}
+
+func handleInspectQueries(client *turso.Client, database string) error {
+	stats, err := client.Databases.Stats(database)
+	if err != nil {
+		return err
+	}
+	tbl := table.New("QUERY", "ROWS WRITTEN", "ROWS READ")
+	for _, query := range stats.TopQueries {
+		tbl.AddRow(query.Query, query.RowsWritten, query.RowsRead)
+	}
+	tbl.Print()
+	fmt.Println()
+	return nil
 }

@@ -14,6 +14,7 @@ import (
 func init() {
 	dbCmd.AddCommand(showCmd)
 	showCmd.Flags().BoolVar(&showUrlFlag, "url", false, "Show URL for the database HTTP API.")
+	showCmd.Flags().BoolVar(&showHttpUrlFlag, "http-url", false, "Show HTTP URL for the database HTTP API.")
 	showCmd.Flags().BoolVar(&showInstanceUrlsFlag, "instance-urls", false, "Show URL for the HTTP API of all existing instances")
 	showCmd.Flags().StringVar(&showInstanceUrlFlag, "instance-url", "", "Show URL for the HTTP API of a selected instance of a database. Instance is selected by instance name.")
 	showCmd.RegisterFlagCompletionFunc("instance-url", completeInstanceName)
@@ -21,13 +22,13 @@ func init() {
 }
 
 var showCmd = &cobra.Command{
-	Use:               "show database_name",
+	Use:               "show <database-name>",
 	Short:             "Show information from a database.",
 	Args:              cobra.ExactArgs(1),
 	ValidArgsFunction: dbNameArg,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cmd.SilenceUsage = true
-		client, err := createTursoClientFromAccessToken(true)
+		client, err := authedTursoClient()
 		if err != nil {
 			return err
 		}
@@ -91,6 +92,9 @@ var showCmd = &cobra.Command{
 		}
 		fmt.Println("Locations:     ", strings.Join(regions, ", "))
 		fmt.Println("Size:          ", humanize.Bytes(dbUsage.Usage.StorageBytesUsed))
+		fmt.Println("Sleeping:      ", formatBool(db.Sleeping))
+		fmt.Println("Bytes Synced:  ", humanize.Bytes(dbUsage.Usage.BytesSynced))
+
 		fmt.Println()
 
 		if len(instances) == 0 {

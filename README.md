@@ -20,7 +20,7 @@ For a guided walkthrough, follow the
 #### [Homebrew](https://brew.sh) (macOS, Linux, WSL)
 
 ```bash
-brew install chiselstrike/tap/turso
+brew install tursodatabase/tap/turso
 ```
 
 Also remember to configure `homebrew`
@@ -37,6 +37,12 @@ brew upgrade turso
 
 ```bash
 curl -sSfL https://get.tur.so/install.sh | bash
+```
+
+### Go
+
+```bash
+go install github.com/tursodatabase/turso-cli/cmd/turso@latest
 ```
 
 ### Building from source

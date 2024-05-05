@@ -7,11 +7,12 @@ import (
 	"github.com/athoscouto/codename"
 	"github.com/spf13/cobra"
 	"github.com/tursodatabase/turso-cli/internal"
+	"github.com/tursodatabase/turso-cli/internal/flags"
 	"github.com/tursodatabase/turso-cli/internal/prompt"
 	"github.com/tursodatabase/turso-cli/internal/turso"
 )
 
-const MaxDumpFileSizeBytes = 2 << 30
+const MaxDumpFileSizeBytes = 8 << 30
 
 func init() {
 	dbCmd.AddCommand(createCmd)
@@ -22,14 +23,17 @@ func init() {
 	addDbFromFileFlag(createCmd)
 	addDbFromCSVFlag(createCmd)
 	addCSVTableNameFlag(createCmd)
+	flags.AddCSVSeparator(createCmd)
 	addLocationFlag(createCmd, "Location ID. If no ID is specified, closest location to you is used by default.")
 	addWaitFlag(createCmd, "Wait for the database to be ready to receive requests.")
 	addCanaryFlag(createCmd)
 	addEnableExtensionsFlag(createCmd)
+	addSchemaFlag(createCmd)
+	addTypeFlag(createCmd)
 }
 
 var createCmd = &cobra.Command{
-	Use:               "create [flags] [database_name]",
+	Use:               "create [flags] [database-name]",
 	Short:             "Create a database.",
 	Args:              cobra.MaximumNArgs(1),
 	ValidArgsFunction: noFilesArg,
@@ -40,11 +44,7 @@ var createCmd = &cobra.Command{
 			return err
 		}
 
-		if err := turso.CheckName(name); err != nil {
-			return fmt.Errorf("invalid database name: %w", err)
-		}
-
-		client, err := createTursoClientFromAccessToken(true)
+		client, err := authedTursoClient()
 		if err != nil {
 			return err
 		}
@@ -77,7 +77,7 @@ var createCmd = &cobra.Command{
 		spinner := prompt.Spinner(fmt.Sprintf("Creating database %s in group %s...", internal.Emph(name), internal.Emph(group)))
 		defer spinner.Stop()
 
-		if _, err = client.Databases.Create(name, location, "", "", group, seed); err != nil {
+		if _, err = client.Databases.Create(name, location, "", "", group, schemaFlag, typeFlag == "schema", seed); err != nil {
 			return fmt.Errorf("could not create database %s: %w", name, err)
 		}
 

@@ -13,6 +13,8 @@ type Group struct {
 	Name      string   `json:"name"`
 	Locations []string `json:"locations"`
 	Primary   string   `json:"primary"`
+	Archived  bool     `json:"archived"`
+	Version   string   `json:"version"`
 }
 
 func (d *GroupsClient) List() ([]Group, error) {
@@ -189,13 +191,32 @@ func (d *GroupsClient) WaitLocation(name, location string) error {
 	return nil
 }
 
-func (d *GroupsClient) Token(group string, expiration string, readOnly bool) (string, error) {
+type Entities struct {
+	DBNames []string `json:"databases,omitempty"`
+}
+
+type PermissionsClaim struct {
+	ReadAttach Entities `json:"read_attach,omitempty"`
+}
+
+type GroupTokenRequest struct {
+	Permissions *PermissionsClaim `json:"permissions,omitempty"`
+}
+
+func (d *GroupsClient) Token(group string, expiration string, readOnly bool, permissions *PermissionsClaim) (string, error) {
 	authorization := ""
 	if readOnly {
 		authorization = "&authorization=read-only"
 	}
 	url := d.URL(fmt.Sprintf("/%s/auth/tokens?expiration=%s%s", group, expiration, authorization))
-	r, err := d.client.Post(url, nil)
+
+	req := GroupTokenRequest{permissions}
+	body, err := marshal(req)
+	if err != nil {
+		return "", fmt.Errorf("could not serialize request body: %w", err)
+	}
+
+	r, err := d.client.Post(url, body)
 	if err != nil {
 		return "", fmt.Errorf("failed to get database token: %w", err)
 	}
@@ -207,8 +228,7 @@ func (d *GroupsClient) Token(group string, expiration string, readOnly bool) (st
 	}
 
 	if r.StatusCode != http.StatusOK {
-		err, _ := unmarshal[string](r)
-		return "", fmt.Errorf("failed to get database token: %d %s", r.StatusCode, err)
+		return "", fmt.Errorf("failed to get database token: %w", parseResponseError(r))
 	}
 
 	type JwtResponse struct{ Jwt string }
@@ -233,8 +253,62 @@ func (d *GroupsClient) Rotate(group string) error {
 	}
 
 	if r.StatusCode != http.StatusOK {
-		err, _ := unmarshal[string](r)
-		return fmt.Errorf("failed to rotate database keys: %d %s", r.StatusCode, err)
+		return fmt.Errorf("failed to rotate database keys: %w", parseResponseError(r))
+	}
+
+	return nil
+}
+
+func (d *GroupsClient) Update(group string, version, extensions string) error {
+	type Body struct{ Version, Extensions string }
+	body, err := marshal(Body{version, extensions})
+	if err != nil {
+		return fmt.Errorf("could not serialize request body: %w", err)
+	}
+
+	url := d.URL(fmt.Sprintf("/%s/update", group))
+	r, err := d.client.Post(url, body)
+	if err != nil {
+		return fmt.Errorf("failed to rotate database keys: %w", err)
+	}
+	defer r.Body.Close()
+
+	org := d.client.Org
+	if isNotMemberErr(r.StatusCode, org) {
+		return notMemberErr(org)
+	}
+
+	if r.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to update group: %w", parseResponseError(r))
+	}
+
+	return nil
+}
+
+func (d *GroupsClient) Transfer(group string, to string) error {
+	type Body struct {
+		Organization string `json:"organization"`
+	}
+	body, err := marshal(Body{to})
+	if err != nil {
+		return fmt.Errorf("could not serialize request body: %w", err)
+	}
+
+	url := d.URL(fmt.Sprintf("/%s/transfer", group))
+	r, err := d.client.Post(url, body)
+	if err != nil {
+		return fmt.Errorf("failed to transfer group: %w", err)
+	}
+	defer r.Body.Close()
+
+	org := d.client.Org
+	if isNotMemberErr(r.StatusCode, org) {
+		return notMemberErr(org)
+	}
+
+	if r.StatusCode != http.StatusOK {
+		err := parseResponseError(r)
+		return fmt.Errorf("failed to transfer group: %w", err)
 	}
 
 	return nil
