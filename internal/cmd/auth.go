@@ -152,7 +152,7 @@ func exitOnValidAuth(settings *settings.Settings, path string) {
 }
 
 func auth(cmd *cobra.Command, path string) error {
-  cmd.SilenceUsage = true
+	cmd.SilenceUsage = true
 	settings, err := settings.ReadSettings()
 	if err != nil {
 		return fmt.Errorf("could not retrieve local config: %w", err)
@@ -160,7 +160,7 @@ func auth(cmd *cobra.Command, path string) error {
 
 	if isJwtTokenValid(settings.GetToken()) {
 		exitOnValidAuth(settings, path)
-    return nil
+		return nil
 	}
 
 	if flags.Headless() {
