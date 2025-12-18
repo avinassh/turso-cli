@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"time"
@@ -20,6 +21,29 @@ func showSchemaDeprecationNotice() {
 
 const MaxDumpFileSizeBytes = 8 << 30
 
+// cipherReservedBytes maps cipher names to their required reserved bytes
+var cipherReservedBytes = map[string]int{
+	"aes256gcm":        28,
+	"aes128gcm":        28,
+	"chacha20poly1305": 28,
+	"aegis128l":        32,
+	"aegis128x2":       32,
+	"aegis128x4":       32,
+	"aegis256":         48,
+	"aegis256x2":       48,
+	"aegis256x4":       48,
+}
+
+func isValidCipher(cipher string) bool {
+	_, ok := cipherReservedBytes[cipher]
+	return ok
+}
+
+func getRequiredReservedBytes(cipher string) (int, bool) {
+	bytes, ok := cipherReservedBytes[cipher]
+	return bytes, ok
+}
+
 func init() {
 	dbCmd.AddCommand(createCmd)
 	addGroupFlag(createCmd)
@@ -32,11 +56,12 @@ func init() {
 	flags.AddCSVSeparator(createCmd)
 	addLocationFlag(createCmd, "Location ID. If no ID is specified, closest location to you is used by default.")
 	addWaitFlag(createCmd, "Wait for the database to be ready to receive requests.")
-	addCanaryFlag(createCmd)
 	addEnableExtensionsFlag(createCmd)
 	addSchemaFlag(createCmd)
 	addTypeFlag(createCmd)
 	addSizeLimitFlag(createCmd)
+	addRemoteEncryptionCipherFlag(createCmd)
+	addRemoteEncryptionKeyFlag(createCmd)
 }
 
 var createCmd = &cobra.Command{
@@ -83,17 +108,17 @@ func CreateDatabase(name string) error {
 	}
 
 	isAWS := strings.HasPrefix(group.Primary, "aws-")
-	seed, err := parseDBSeedFlags(client, isAWS)
+
+	if err = validateEncryptionFlags(); err != nil {
+		return err
+	}
+
+	seed, err := parseDBSeedFlags(client, isAWS, remoteEncryptionCipherFlag, multipartFlag)
 	if err != nil {
 		return err
 	}
 
-	version := "latest"
-	if canaryFlag {
-		version = "canary"
-	}
-
-	if err := ensureGroup(client, groupName, groups, location, version); err != nil {
+	if err := ensureGroup(client, groupName, groups, location, "latest"); err != nil {
 		return err
 	}
 
@@ -101,7 +126,7 @@ func CreateDatabase(name string) error {
 	spinner := prompt.Spinner(fmt.Sprintf("Creating database %s in group %s...", internal.Emph(name), internal.Emph(groupName)))
 	defer spinner.Stop()
 
-	if _, err = client.Databases.Create(name, location, "", "", groupName, schemaFlag, typeFlag == "schema", seed, sizeLimitFlag, spinner); err != nil {
+	if _, err = client.Databases.Create(name, location, "", "", groupName, schemaFlag, typeFlag == "schema", seed, sizeLimitFlag, remoteEncryptionCipherFlag, remoteEncryptionKeyFlag(), spinner); err != nil {
 		return fmt.Errorf("could not create database %s: %w", name, err)
 	}
 
@@ -208,4 +233,40 @@ func locationFromFlag(client *turso.Client, group turso.Group, groups []turso.Gr
 func shouldAutoCreateGroup(name string, groups []turso.Group) bool {
 	// we only create the default group automatically
 	return name == "default" && len(groups) == 0
+}
+
+func validateEncryptionFlags() error {
+	remoteEncryptionKey := remoteEncryptionKeyFlag()
+	if remoteEncryptionKey == "" && remoteEncryptionCipherFlag == "" {
+		return nil
+	}
+	// if key flag is empty, then user passed only the cipher, which is invalid
+	if remoteEncryptionKey == "" {
+		return fmt.Errorf("remote encryption key must be provided when remote encryption cipher is set")
+	}
+
+	// if key is provided, lets verify its in base64 encoded
+	_, err := base64.StdEncoding.DecodeString(remoteEncryptionKey)
+	if err != nil {
+		return fmt.Errorf("encryption key (%s) is not valid base64: %w", remoteEncryptionKey, err)
+	}
+
+	// if cipher is empty, then it is only valid in case of forks and for everything else we need to have it set
+	if remoteEncryptionCipherFlag == "" {
+		if fromDBFlag == "" {
+			return fmt.Errorf("remote encryption cipher must be provided when remote encryption key is set")
+		}
+		// for forks, cipher can be derived from source database
+		return nil
+	}
+
+	if !isValidCipher(remoteEncryptionCipherFlag) {
+		validCiphers := make([]string, 0, len(cipherReservedBytes))
+		for cipher := range cipherReservedBytes {
+			validCiphers = append(validCiphers, cipher)
+		}
+		return fmt.Errorf("unknown encryption cipher: %s. Valid ciphers are: %s", remoteEncryptionCipherFlag, strings.Join(validCiphers, ", "))
+	}
+
+	return nil
 }

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -20,6 +21,7 @@ type progressReader struct {
 	reader     io.Reader
 	totalSize  int64
 	bytesRead  int64
+	baseBytes  int64 // Bytes already uploaded before progressReader started
 	startTime  time.Time
 	onProgress func(progressPct int, uploadedBytes int64, totalBytes int64, elapsedTime time.Duration, done bool)
 	lastUpdate int // Last reported progress percentage. Initially -1 to ensure first update is always sent.
@@ -29,13 +31,14 @@ func (pr *progressReader) Read(p []byte) (int, error) {
 	n, err := pr.reader.Read(p)
 	if n > 0 {
 		pr.bytesRead += int64(n)
-		progressPct := int(float64(pr.bytesRead) / float64(pr.totalSize) * 100)
+		totalUploaded := pr.baseBytes + pr.bytesRead
+		progressPct := int(float64(totalUploaded) / float64(pr.totalSize) * 100)
 
 		// Only call progress if we've made at least 1% progress or if we're done
 		if progressPct > pr.lastUpdate || errors.Is(err, io.EOF) {
 			elapsedTime := time.Since(pr.startTime)
 			pr.lastUpdate = progressPct
-			pr.onProgress(progressPct, pr.bytesRead, pr.totalSize, elapsedTime, errors.Is(err, io.EOF))
+			pr.onProgress(progressPct, totalUploaded, pr.totalSize, elapsedTime, errors.Is(err, io.EOF))
 		}
 	}
 	return n, err
@@ -55,15 +58,20 @@ func NewTursoServerClient(baseURL *url.URL, token string, cliVersion string, org
 	}, nil
 }
 
-// UploadFile uploads a database file to the Turso server.
+// UploadFileSinglePart uploads a database file to the Turso server using a single request.
 // it assumes a SQLite file exists at 'filepath'.
 // it streams the file to the server, and calls the onProgress callback with the progress of the upload.
-func (i *TursoServerClient) UploadFile(filepath string, onUploadProgress func(progressPct int, uploadedBytes int64, totalBytes int64, elapsedTime time.Duration, done bool)) error {
+func (i *TursoServerClient) UploadFileSinglePart(filepath, remoteEncryptionCipher, remoteEncryptionKey string, onUploadProgress func(progressPct int, uploadedBytes int64, totalBytes int64, elapsedTime time.Duration, done bool)) error {
 	file, err := os.Open(filepath)
 	if err != nil {
 		return fmt.Errorf("failed to open file %s: %w", filepath, err)
 	}
 	defer file.Close()
+
+	// locking is on a best effort basis
+	if unlock, err := lockFileExclusive(file); err == nil {
+		defer unlock()
+	}
 
 	stat, err := file.Stat()
 	if err != nil {
@@ -81,8 +89,14 @@ func (i *TursoServerClient) UploadFile(filepath string, onUploadProgress func(pr
 		lastUpdate: -1, // Ensure first update is always sent
 	}
 
+	headers := map[string]string{}
+	if remoteEncryptionCipher != "" && remoteEncryptionKey != "" {
+		headers[EncryptionCipherHeader] = remoteEncryptionCipher
+		headers[EncryptionKeyHeader] = remoteEncryptionKey
+	}
+
 	// Send POST request with streaming body
-	r, err := i.client.PostBinary("/v1/upload", progressTracker)
+	r, err := i.client.PostBinary("/v1/upload", progressTracker, headers)
 	if err != nil {
 		return fmt.Errorf("failed to upload file: %w", err)
 	}
@@ -99,12 +113,169 @@ func (i *TursoServerClient) UploadFile(filepath string, onUploadProgress func(pr
 	return nil
 }
 
+// UploadFileMultipart uploads a database file using the multipart upload flow.
+func (i *TursoServerClient) UploadFileMultipart(filepath string, remoteEncryptionCipher, remoteEncryptionKey string, onUploadProgress func(progressPct int, uploadedBytes int64, totalBytes int64, elapsedTime time.Duration, done bool)) error {
+	file, err := os.Open(filepath)
+	if err != nil {
+		return fmt.Errorf("failed to open file %s: %w", filepath, err)
+	}
+	defer file.Close()
+
+	// locking is on a best effort basis
+	if unlock, err := lockFileExclusive(file); err == nil {
+		defer unlock()
+	}
+
+	stat, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to get file stats for %s: %w", filepath, err)
+	}
+
+	totalSize := stat.Size()
+	startTime := time.Now()
+
+	chunkSize, err := i.startMultipartUpload(totalSize)
+	if err != nil {
+		return err
+	}
+
+	uploadedBytes, err := i.uploadChunks(chunkSize, file, totalSize, startTime, remoteEncryptionCipher, remoteEncryptionKey, onUploadProgress)
+	if err != nil {
+		return err
+	}
+
+	if err = i.finalizeUpload(); err != nil {
+		return err
+	}
+
+	elapsedTime := time.Since(startTime)
+	onUploadProgress(100, uploadedBytes, totalSize, elapsedTime, true)
+
+	return nil
+}
+
+func (i *TursoServerClient) startMultipartUpload(dbSize int64) (int64, error) {
+	requestBody := map[string]int64{
+		"db_size_bytes": dbSize,
+	}
+
+	body, err := marshal(requestBody)
+	if err != nil {
+		return 0, fmt.Errorf("failed to marshal multipart upload request: %w", err)
+	}
+
+	r, err := i.client.Put("/v2/upload/start", body)
+	if err != nil {
+		return 0, fmt.Errorf("failed to initiate multipart upload: %w", err)
+	}
+	defer r.Body.Close()
+
+	if r.StatusCode != http.StatusOK {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			return 0, fmt.Errorf("initiate multipart upload failed with status code %d and error reading response: %v", r.StatusCode, err)
+		}
+		return 0, fmt.Errorf("initiate multipart upload failed with status code %d: %s", r.StatusCode, string(body))
+	}
+
+	type multipartUploadResponse struct {
+		ChunkSize int64 `json:"chunk_size"`
+	}
+	var uploadResp multipartUploadResponse
+	if err := json.NewDecoder(r.Body).Decode(&uploadResp); err != nil {
+		return 0, fmt.Errorf("failed to decode multipart upload response: %w", err)
+	}
+
+	return uploadResp.ChunkSize, nil
+}
+
+func (i *TursoServerClient) uploadChunks(chunkSize int64, file io.Reader, totalSize int64, startTime time.Time, remoteEncryptionCipher, remoteEncryptionKey string, onUploadProgress func(progressPct int, uploadedBytes int64, totalBytes int64, elapsedTime time.Duration, done bool)) (int64, error) {
+	var uploadedBytes int64 = 0
+	chunkID := 0
+	lastProgressPct := -1
+
+	for uploadedBytes < totalSize {
+		remaining := totalSize - uploadedBytes
+		currentChunkSize := chunkSize
+		if remaining < chunkSize {
+			currentChunkSize = remaining
+		}
+
+		chunkReader := io.LimitReader(file, currentChunkSize)
+
+		progressTracker := &progressReader{
+			reader:     chunkReader,
+			totalSize:  totalSize,
+			baseBytes:  uploadedBytes,
+			startTime:  startTime,
+			onProgress: onUploadProgress,
+			lastUpdate: lastProgressPct,
+		}
+
+		chunkPath := fmt.Sprintf("/v2/upload/chunk/%d", chunkID)
+
+		var headers = map[string]string{}
+		if remoteEncryptionCipher != "" && remoteEncryptionKey != "" {
+			headers[EncryptionCipherHeader] = remoteEncryptionCipher
+			headers[EncryptionKeyHeader] = remoteEncryptionKey
+		}
+		headers["Content-Length"] = strconv.FormatInt(currentChunkSize, 10)
+
+		r, err := i.client.PutBinary(chunkPath, progressTracker, headers)
+		if err != nil {
+			return 0, fmt.Errorf("failed to upload chunk %d: %w", chunkID, err)
+		}
+
+		if r.StatusCode != http.StatusOK && r.StatusCode != http.StatusCreated {
+			if body, err := io.ReadAll(r.Body); err != nil {
+				_ = r.Body.Close()
+				return 0, fmt.Errorf("upload chunk %d failed with status code %d and error reading response: %v", chunkID, r.StatusCode, err)
+			} else {
+				_ = r.Body.Close()
+				return 0, fmt.Errorf("upload chunk %d failed with status code %d: %s", chunkID, r.StatusCode, string(body))
+			}
+		} else {
+			_ = r.Body.Close()
+		}
+
+		uploadedBytes += currentChunkSize
+		lastProgressPct = progressTracker.lastUpdate
+
+		chunkID++
+	}
+	return uploadedBytes, nil
+}
+
+func (i *TursoServerClient) finalizeUpload() error {
+	r, err := i.client.Put("/v2/upload/finalize", nil)
+	if err != nil {
+		return fmt.Errorf("failed to finalize multipart upload: %w", err)
+	}
+	defer r.Body.Close()
+
+	if r.StatusCode != http.StatusOK {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			return fmt.Errorf("finalize multipart upload failed with status code %d and error reading response: %v", r.StatusCode, err)
+		}
+		return fmt.Errorf("finalize multipart upload failed with status code %d: %s", r.StatusCode, string(body))
+	}
+	return nil
+}
+
 type ExportInfo struct {
 	CurrentGeneration int `json:"current_generation"`
 }
 
-func (i *TursoServerClient) Export(outputFile string, withMetadata bool) error {
-	res, err := i.client.Get("/info", nil)
+const EncryptionKeyHeader = "x-turso-encryption-key"
+const EncryptionCipherHeader = "x-turso-encryption-cipher"
+
+func (i *TursoServerClient) Export(outputFile string, withMetadata bool, remoteEncryptionKey string) error {
+	headers := map[string]string{}
+	if remoteEncryptionKey != "" {
+		headers[EncryptionKeyHeader] = remoteEncryptionKey
+	}
+	res, err := i.client.GetWithHeaders("/info", nil, headers)
 	if err != nil {
 		return fmt.Errorf("failed to fetch database info: %w", err)
 	}
@@ -117,7 +288,7 @@ func (i *TursoServerClient) Export(outputFile string, withMetadata bool) error {
 		return fmt.Errorf("failed to decode /info response: %w", err)
 	}
 
-	exportRes, err := i.client.Get(fmt.Sprintf("/export/%d", info.CurrentGeneration), nil)
+	exportRes, err := i.client.GetWithHeaders(fmt.Sprintf("/export/%d", info.CurrentGeneration), nil, headers)
 	if err != nil {
 		return fmt.Errorf("failed to fetch export: %w", err)
 	}
@@ -135,7 +306,7 @@ func (i *TursoServerClient) Export(outputFile string, withMetadata bool) error {
 		return fmt.Errorf("failed to write export to file: %w", err)
 	}
 
-	lastFrameNo, err := i.ExportWAL(outputFile, &info)
+	lastFrameNo, err := i.ExportWAL(outputFile, &info, remoteEncryptionKey)
 	if err != nil {
 		return fmt.Errorf("failed to export WAL: %w", err)
 	}
@@ -148,7 +319,7 @@ func (i *TursoServerClient) Export(outputFile string, withMetadata bool) error {
 	return nil
 }
 
-func (i *TursoServerClient) ExportWAL(outputFile string, info *ExportInfo) (int, error) {
+func (i *TursoServerClient) ExportWAL(outputFile string, info *ExportInfo, remoteEncryptionKey string) (int, error) {
 	walFile := outputFile + "-wal"
 	walOut, err := os.Create(walFile)
 	if err != nil {
@@ -191,9 +362,13 @@ func (i *TursoServerClient) ExportWAL(outputFile string, info *ExportInfo) (int,
 	const batchSize = 128
 	frameNo := 1
 	lastFrameNo := 0
+	headers := map[string]string{}
+	if remoteEncryptionKey != "" {
+		headers[EncryptionKeyHeader] = remoteEncryptionKey
+	}
 
 	for {
-		walRes, err := i.client.Get(fmt.Sprintf("/sync/%d/%d/%d", info.CurrentGeneration, frameNo, frameNo+batchSize), nil)
+		walRes, err := i.client.GetWithHeaders(fmt.Sprintf("/sync/%d/%d/%d", info.CurrentGeneration, frameNo, frameNo+batchSize), nil, headers)
 		if err != nil {
 			if frameNo == 1 {
 				break
